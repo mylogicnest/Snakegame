@@ -1,217 +1,69 @@
-"""
-Snake Game (frontend client). It talks to the Flask backend in app.py
-through the API: GET /api/scores and POST /api/scores.
-
-1. Start the backend first:  python3 app.py
-2. Then, in a second terminal:  python3 snakegame.py
-"""
-import time
+"""Pure game rules, shared by the client (play) and the server (score checks)."""
 import random
-import threading
-import tkinter
-import turtle
 
-import requests
+GRID = 20
+POINTS_PER_FOOD = 10
+START_TICK_MS = 130
+MIN_TICK_MS = 60
+SPEEDUP_MS = 4
+MAX_SCORE = GRID * GRID * POINTS_PER_FOOD
 
-API_URL = "http://127.0.0.1:5001/api/scores"
-START_DELAY = 0.07
-MIN_DELAY = 0.03
-
-
-# ---------- API calls (pointer c: frontend <-> backend integration) ----------
-def fetch_high_score():
-    """Ask the backend for the best score so far."""
-    try:
-        response = requests.get(API_URL, timeout=2)
-        response.raise_for_status()
-        scores = response.json()
-        return scores[0]["score"] if scores else 0
-    except requests.exceptions.RequestException:
-        print("Backend not reachable, starting with high score 0.")
-        return 0
+UP, DOWN, LEFT, RIGHT = (0, -1), (0, 1), (-1, 0), (1, 0)
 
 
-def submit_score(player, value):
-    """Send the finished game's score to the backend."""
-    try:
-        response = requests.post(
-            API_URL, json={"player": player, "score": value}, timeout=2
-        )
-        response.raise_for_status()
-        print("Score saved:", response.json())
-    except requests.exceptions.RequestException:
-        print("Could not save the score (is app.py running?).")
+class SnakeGame:
+    def __init__(self, grid=GRID, rng=None):
+        self.grid = grid
+        self.rng = rng or random.Random()
+        mid = grid // 2
+        self.snake = [(mid, mid), (mid - 1, mid), (mid - 2, mid)]  # head first
+        self.direction = RIGHT
+        self._queue = []          # buffered turns so fast key presses aren't lost
+        self.score = 0
+        self.tick_ms = START_TICK_MS
+        self.alive = True
+        self.won = False
+        self.food = None
+        self._place_food()
 
+    def _place_food(self):
+        taken = set(self.snake)
+        free = [(x, y) for x in range(self.grid) for y in range(self.grid) if (x, y) not in taken]
+        self.food = self.rng.choice(free) if free else None
 
-# ---------- Game setup ----------
-player = input("Enter your name: ").strip() or "Anonymous"
-
-delay = START_DELAY
-score = 0
-high_score = fetch_high_score()
-
-screen = turtle.Screen()
-screen.title("Snake Game")
-screen.bgcolor("black")
-screen.setup(width=600, height=600)
-screen.tracer(0)
-
-head = turtle.Turtle()
-head.speed(0)
-head.shape("square")
-head.color("lime")
-head.penup()
-head.goto(0, 0)
-head.direction = "stop"
-
-food = turtle.Turtle()
-food.speed(0)
-food.shape("circle")
-food.color("red")
-food.penup()
-food.goto(0, 100)
-
-pen = turtle.Turtle()
-pen.speed(0)
-pen.color("white")
-pen.penup()
-pen.hideturtle()
-pen.goto(0, 260)
-
-segments = []
-
-
-def update_score():
-    pen.clear()
-    pen.write(
-        f"{player}   Score: {score}   High Score: {high_score}",
-        align="center",
-        font=("Arial", 16, "normal"),
-    )
-
-
-def place_food():
-    """Put the food on the same grid as the snake, never on the snake."""
-    while True:
-        x = random.randrange(-280, 281, 20)
-        y = random.randrange(-280, 281, 20)
-        on_snake = head.distance(x, y) < 20 or any(
-            s.distance(x, y) < 20 for s in segments
-        )
-        if not on_snake:
-            food.goto(x, y)
+    def turn(self, new_dir):
+        """Queue a turn. Reversing straight into yourself is ignored."""
+        ref = self._queue[-1] if self._queue else self.direction
+        if new_dir == ref or (new_dir[0] == -ref[0] and new_dir[1] == -ref[1]):
             return
+        if len(self._queue) < 2:
+            self._queue.append(new_dir)
 
+    def step(self):
+        """Advance one tick. Returns True if the game is still running."""
+        if not self.alive:
+            return False
+        if self._queue:
+            self.direction = self._queue.pop(0)
 
-update_score()
+        hx, hy = self.snake[0]
+        head = (hx + self.direction[0], hy + self.direction[1])
+        eating = head == self.food
+        body = self.snake if eating else self.snake[:-1]  # tail moves away unless growing
 
+        out = not (0 <= head[0] < self.grid and 0 <= head[1] < self.grid)
+        if out or head in body:
+            self.alive = False
+            return False
 
-# ---------- Controls ----------
-def go_up():
-    if head.direction != "down":
-        head.direction = "up"
-
-
-def go_down():
-    if head.direction != "up":
-        head.direction = "down"
-
-
-def go_left():
-    if head.direction != "right":
-        head.direction = "left"
-
-
-def go_right():
-    if head.direction != "left":
-        head.direction = "right"
-
-
-def move():
-    if head.direction == "up":
-        head.sety(head.ycor() + 20)
-    elif head.direction == "down":
-        head.sety(head.ycor() - 20)
-    elif head.direction == "left":
-        head.setx(head.xcor() - 20)
-    elif head.direction == "right":
-        head.setx(head.xcor() + 20)
-
-
-screen.listen()
-screen.onkeypress(go_up, "Up")
-screen.onkeypress(go_down, "Down")
-screen.onkeypress(go_left, "Left")
-screen.onkeypress(go_right, "Right")
-
-
-def game_over():
-    """Send the score to the backend (in the background), then reset."""
-    global score, delay
-
-    if score > 0:
-        # Background thread so the game doesn't freeze while waiting
-        threading.Thread(
-            target=submit_score, args=(player, score), daemon=True
-        ).start()
-
-    time.sleep(0.5)
-    head.goto(0, 0)
-    head.direction = "stop"
-
-    for segment in segments:
-        segment.goto(1000, 1000)
-    segments.clear()
-
-    place_food()
-    score = 0
-    delay = START_DELAY
-    update_score()
-
-
-# ---------- Main loop ----------
-try:
-    while True:
-        screen.update()
-
-        # Wall collision
-        if (head.xcor() > 290 or head.xcor() < -290 or
-                head.ycor() > 290 or head.ycor() < -290):
-            game_over()
-
-        # Eating food
-        if head.distance(food) < 20:
-            segment = turtle.Turtle()
-            segment.speed(0)
-            segment.shape("square")
-            segment.color("green")
-            segment.penup()
-            segment.goto(1000, 1000)
-            segments.append(segment)
-
-            score += 10
-            if score > high_score:
-                high_score = score
-            delay = max(MIN_DELAY, delay - 0.002)
-            place_food()
-            update_score()
-
-        # Move the body
-        for i in range(len(segments) - 1, 0, -1):
-            segments[i].goto(segments[i - 1].xcor(), segments[i - 1].ycor())
-        if segments:
-            segments[0].goto(head.xcor(), head.ycor())
-
-        move()
-
-        # Body collision
-        for segment in segments:
-            if segment.distance(head) < 10:
-                game_over()
-                break
-
-        time.sleep(delay)
-
-except (turtle.Terminator, tkinter.TclError):
-    # Window was closed, exit quietly
-    print("Game closed.")
+        self.snake.insert(0, head)
+        if eating:
+            self.score += POINTS_PER_FOOD
+            self.tick_ms = max(MIN_TICK_MS, self.tick_ms - SPEEDUP_MS)
+            self._place_food()
+            if self.food is None:
+                self.alive, self.won = False, True
+                return False
+        else:
+            self.snake.pop()
+        return True
